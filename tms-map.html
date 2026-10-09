@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TMS 도우미 · 카카오 지도</title>
+<!--
+  TMS 도우미(크롬 확장)가 지도 탭에 끼워 넣어 쓰는 카카오 지도 페이지입니다.  (선택 기능)
+  - 이 파일 하나를 본인 사이트(Netlify 등)에 올리고, 그 주소(도메인)를 카카오 개발자 사이트 → 내 애플리케이션 →
+    플랫폼 → Web 에 등록해야 지도가 뜹니다.
+  - 카카오 JavaScript 키는 이 파일에 적지 않습니다. 확장 프로그램 설정에 넣어 두면 주소 뒤(#k=…)로 건네받습니다.
+  - 확장 프로그램이 건네는 것은 지도에 찍을 점과 선뿐입니다. 이 페이지는 받은 것을 그리기만 합니다.
+-->
+<style>
+  html, body, #map { margin: 0; height: 100%; }
+  body { font: 12px/1.4 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; background: #e9eff4; }
+  #msg { position: absolute; inset: 0; display: none; place-items: center; text-align: center; padding: 18px; color: #4b5360; background: #f4f5f7; z-index: 10; white-space: pre-line; }
+  #msg b { display: block; color: #14171c; font-size: 13px; margin-bottom: 6px; }
+  .pin { min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: #2f4fc7; color: #fff; font-weight: 800; font-size: 11px; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 5px rgba(0,0,0,.4); white-space: nowrap; }
+  .pin.d { background: #e0532f; }
+  .dist { background: #fff; border: 1px solid #d5d9de; border-radius: 999px; padding: 1px 8px; font-weight: 700; font-size: 11px; color: #4b5360; box-shadow: 0 1px 3px rgba(0,0,0,.15); white-space: nowrap; }
+  #bar { position: absolute; left: 8px; bottom: 8px; z-index: 5; display: flex; gap: 5px; }
+  #bar button { border: 0; border-radius: 8px; padding: 5px 9px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); font: inherit; font-weight: 700; cursor: pointer; }
+  #bar button.on { background: #14171c; color: #fff; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="bar"><button id="bTraffic">교통정보</button><button id="bFit">전체 보기</button></div>
+<div id="msg"></div>
+<script>
+(function () {
+  'use strict';
+  var key = (/[#&]k=([^&]+)/.exec(location.hash) || [])[1] || '';
+  var map = null, ready = false, pending = null, drawn = [], bounds = null, traffic = false;
+  function say(title, text) { var m = document.getElementById('msg'); m.innerHTML = '<div><b></b><span></span></div>'; m.querySelector('b').textContent = title; m.querySelector('span').textContent = text; m.style.display = 'grid'; }
+  function hush() { document.getElementById('msg').style.display = 'none'; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || d.type !== 'tms-map' || !Array.isArray(d.points)) return;
+    pending = d;
+    if (ready) draw();
+  });
+
+  if (!key) { say('카카오 JavaScript 키가 없습니다', 'TMS 도우미 설정에 JavaScript 키를 넣어 주세요.'); return; }
+  var s = document.createElement('script');
+  s.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + encodeURIComponent(decodeURIComponent(key)) + '&autoload=false';
+  s.onerror = function () { say('카카오 지도를 불러오지 못했습니다', 'JavaScript 키가 맞는지 확인해 주세요.'); };
+  s.onload = function () {
+    var timer = setTimeout(function () { if (!ready) say('카카오 지도가 열리지 않습니다', '카카오 개발자 사이트의 플랫폼(Web)에\n' + location.origin + '\n이 등록되어 있는지 확인해 주세요.'); }, 6000);
+    try {
+      kakao.maps.load(function () {
+        clearTimeout(timer);
+        map = new kakao.maps.Map(document.getElementById('map'), { center: new kakao.maps.LatLng(36.2, 127.9), level: 12 });
+        map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+        map.addControl(new kakao.maps.MapTypeControl(), kakao.maps.ControlPosition.TOPRIGHT);
+        ready = true; hush();
+        try { parent.postMessage({ type: 'tms-map-ready' }, '*'); } catch (e) {}
+        if (pending) draw();
+      });
+    } catch (e) { say('카카오 지도를 시작하지 못했습니다', String(e && e.message || e)); }
+  };
+  document.head.appendChild(s);
+
+  function draw() {
+    drawn.forEach(function (o) { o.setMap(null); });
+    drawn = []; bounds = new kakao.maps.LatLngBounds();
+    var d = pending, n = 0;
+    (d.lines || []).forEach(function (ln) {
+      if (!ln.path || ln.path.length < 2) return;
+      var path = ln.path.map(function (p) { return new kakao.maps.LatLng(p[0], p[1]); });
+      var pl = new kakao.maps.Polyline({ path: path, strokeWeight: ln.hot ? 5 : 3, strokeColor: ln.color || (ln.hot ? '#2f4fc7' : '#56607a'), strokeOpacity: ln.hot ? 0.85 : 0.6, strokeStyle: ln.hot ? 'solid' : 'shortdash' });
+      pl.setMap(map); drawn.push(pl);
+      if (ln.text) {
+        var mid = path[Math.floor(path.length / 2)];
+        if (path.length === 2) mid = new kakao.maps.LatLng((ln.path[0][0] + ln.path[1][0]) / 2, (ln.path[0][1] + ln.path[1][1]) / 2);
+        var lb = new kakao.maps.CustomOverlay({ position: mid, content: '<div class="dist">' + esc(ln.text) + '</div>', xAnchor: 0.5, yAnchor: 0.5, zIndex: 2 });
+        lb.setMap(map); drawn.push(lb);
+      }
+    });
+    // 같은 자리의 점은 하나로 모아 글자를 함께 적는다
+    var groups = {}, order = [];
+    d.points.forEach(function (p) {
+      if (!isFinite(p.lat) || !isFinite(p.lng)) return;
+      var k = p.kind + '|' + p.lat.toFixed(4) + '|' + p.lng.toFixed(4);
+      if (!groups[k]) { groups[k] = { lat: p.lat, lng: p.lng, kind: p.kind, tags: [], titles: [] }; order.push(k); }
+      groups[k].tags.push(p.tag); groups[k].titles.push(p.title + (p.sub ? ' (' + p.sub + ')' : ''));
+    });
+    order.forEach(function (k) {
+      var g = groups[k], pos = new kakao.maps.LatLng(g.lat, g.lng);
+      var text = g.tags.length > 4 ? g.tags.slice(0, 3).join('·') + '+' + (g.tags.length - 3) : g.tags.join('·');
+      var ov = new kakao.maps.CustomOverlay({ position: pos, content: '<div class="pin ' + (g.kind === 'd' ? 'd' : 'o') + '" title="' + esc(g.titles.join('\n')) + '">' + esc(text) + '</div>', xAnchor: 0.5, yAnchor: 0.5, zIndex: g.kind === 'o' ? 4 : 3 });
+      ov.setMap(map); drawn.push(ov);
+      bounds.extend(pos); n++;
+    });
+    fit(n);
+  }
+  function fit(n) {
+    if (!map || !bounds) return;
+    map.relayout();
+    if (n === undefined) n = 2;
+    if (n === 0) { map.setCenter(new kakao.maps.LatLng(36.2, 127.9)); map.setLevel(12); }
+    else if (n === 1) { map.setCenter(bounds.getSouthWest()); map.setLevel(6); }
+    else map.setBounds(bounds, 50, 50, 50, 50);
+  }
+  document.getElementById('bFit').addEventListener('click', function () { if (pending) fit(pending.points.length); });
+  document.getElementById('bTraffic').addEventListener('click', function () {
+    if (!map) return;
+    traffic = !traffic; this.className = traffic ? 'on' : '';
+    if (traffic) map.addOverlayMapTypeId(kakao.maps.MapTypeId.TRAFFIC); else map.removeOverlayMapTypeId(kakao.maps.MapTypeId.TRAFFIC);
+  });
+  window.addEventListener('resize', function () { if (map) map.relayout(); });
+})();
+</script>
+</body>
+</html>
